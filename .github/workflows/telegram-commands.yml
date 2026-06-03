@@ -1,26 +1,9 @@
-name: Matcha Restock Check
+name: Telegram Commands
 
 on:
   schedule:
-    - cron: "*/5 0-8 * * 1-5"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
-    inputs:
-      skip_business_hours_check:
-        description: "Allow a manual test run outside Japan business hours"
-        required: true
-        default: "true"
-        type: choice
-        options:
-          - "true"
-          - "false"
-      baseline_only:
-        description: "Save current statuses without sending stock-change alerts"
-        required: true
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
 
 permissions:
   contents: write
@@ -30,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check-stock:
+  telegram-commands:
     runs-on: ubuntu-latest
 
     steps:
@@ -47,17 +30,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Refresh branch before checking
+      - name: Refresh branch before command polling
         run: git pull --ff-only origin main
 
-      - name: Run stock checker
+      - name: Process Telegram commands
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
-          SKIP_BUSINESS_HOURS_CHECK: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_business_hours_check || 'false' }}
-          BASELINE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.baseline_only || 'false' }}
-        run: python check_stock.py
+        run: python check_stock.py --mode commands
 
       - name: Commit updated state.json
         run: |
@@ -80,7 +61,7 @@ jobs:
               exit 0
             fi
 
-            git commit -m "Update stock check state"
+            git commit -m "Update Telegram command state"
 
             if git push origin HEAD:main; then
               echo "state.json pushed successfully."

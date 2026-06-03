@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import re
@@ -215,6 +216,13 @@ def user_status_label(status: str) -> str:
     return labels.get(status, status.lower())
 
 
+def inventory_cache_label(state: Dict) -> str:
+    last_checked_at = state.get("last_checked_at")
+    if not last_checked_at:
+        return "Inventory cache: not checked yet."
+    return f"Inventory cache last checked: {last_checked_at}"
+
+
 def check_product(product: Dict[str, str]) -> Dict[str, str]:
     with requests.Session() as session:
         try:
@@ -372,21 +380,35 @@ def product_block(product: Dict) -> str:
 def build_status_messages(state: Dict) -> List[str]:
     products = state.get("products", {})
     if not products:
-        return ["Inventory has not been checked yet. Try again after the next scheduled check."]
+        return [
+            "Inventory has not been checked yet. Try again after the next scheduled check.\n\n"
+            f"{inventory_cache_label(state)}"
+        ]
 
     in_stock_products = [product for product in products.values() if product.get("status") == IN_STOCK]
     if not in_stock_products:
-        return ["No matcha products appear in stock right now. I'll notify you when something restocks."]
+        return [
+            "No matcha products appear in stock right now. I'll notify you when something restocks.\n\n"
+            f"{inventory_cache_label(state)}"
+        ]
 
     blocks = [product_block(product) for product in sorted(in_stock_products, key=lambda item: item.get("name", ""))]
-    title = f"Currently available matcha products: {len(in_stock_products)}"
+    title = "\n".join(
+        [
+            f"Currently available matcha products: {len(in_stock_products)}",
+            inventory_cache_label(state),
+        ]
+    )
     return split_blocks_into_messages(title, blocks)
 
 
 def build_all_inventory_messages(state: Dict) -> List[str]:
     products = state.get("products", {})
     if not products:
-        return ["Inventory has not been checked yet. Try again after the next scheduled check."]
+        return [
+            "Inventory has not been checked yet. Try again after the next scheduled check.\n\n"
+            f"{inventory_cache_label(state)}"
+        ]
 
     grouped = {
         IN_STOCK: [],
@@ -402,6 +424,7 @@ def build_all_inventory_messages(state: Dict) -> List[str]:
     title = "\n".join(
         [
             "Matcha inventory summary",
+            inventory_cache_label(state),
             f"Available: {len(grouped.get(IN_STOCK, []))}",
             f"Sold out: {len(grouped.get(OUT_OF_STOCK, []))}",
             f"Unknown/check failed: {unknown_count}",
@@ -619,14 +642,18 @@ def run_product_checks(state: Dict, bot_token: str, fallback_chat_id: Optional[s
     return True
 
 
-def main() -> None:
-    bot_token = os.environ.get("BOT_TOKEN")
-    fallback_chat_id = os.environ.get("CHAT_ID")
-    admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
+def run_commands_mode(bot_token: str) -> None:
+    state = load_state()
+    telegram_state_changed = process_telegram_commands(state, bot_token)
 
-    if not bot_token:
-        raise ValueError("Missing BOT_TOKEN environment variable.")
+    if telegram_state_changed:
+        save_state(state)
+        print("state.json saved with Telegram command updates.")
+    else:
+        print("No Telegram command state changes to save.")
 
+
+def run_inventory_mode(bot_token: str, fallback_chat_id: Optional[str], admin_chat_id: Optional[str]) -> None:
     state = load_state()
     telegram_state_changed = process_telegram_commands(state, bot_token)
 
@@ -641,6 +668,34 @@ def main() -> None:
     if telegram_state_changed or product_state_changed:
         save_state(state)
         print("state.json saved.")
+    else:
+        print("No state changes to save.")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Marukyu Koyamaen matcha restock bot.")
+    parser.add_argument(
+        "--mode",
+        choices=["commands", "inventory"],
+        required=True,
+        help="commands processes Telegram commands only; inventory also checks product stock.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    bot_token = os.environ.get("BOT_TOKEN")
+    fallback_chat_id = os.environ.get("CHAT_ID")
+    admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
+
+    if not bot_token:
+        raise ValueError("Missing BOT_TOKEN environment variable.")
+
+    if args.mode == "commands":
+        run_commands_mode(bot_token)
+    else:
+        run_inventory_mode(bot_token, fallback_chat_id, admin_chat_id)
 
 
 if __name__ == "__main__":
