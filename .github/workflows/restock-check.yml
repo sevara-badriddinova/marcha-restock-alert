@@ -65,15 +65,31 @@ jobs:
           git config user.email "github-actions@github.com"
 
           cp state.json "$RUNNER_TEMP/state.json"
-          git fetch origin main
-          git reset --hard origin/main
-          cp "$RUNNER_TEMP/state.json" state.json
 
-          git add state.json
+          for attempt in 1 2 3; do
+            echo "State push attempt $attempt"
 
-          if git diff --cached --quiet; then
-            echo "No state change to commit."
-          else
+            git fetch origin main
+            git reset --hard origin/main
+            cp "$RUNNER_TEMP/state.json" state.json
+
+            git add state.json
+
+            if git diff --cached --quiet; then
+              echo "No state change to commit."
+              exit 0
+            fi
+
             git commit -m "Update stock check state"
-            git push origin main
-          fi
+
+            if git push origin HEAD:main; then
+              echo "state.json pushed successfully."
+              exit 0
+            fi
+
+            echo "Push failed because main moved. Retrying..."
+            sleep 5
+          done
+
+          echo "Could not push state.json after 3 attempts."
+          exit 1
