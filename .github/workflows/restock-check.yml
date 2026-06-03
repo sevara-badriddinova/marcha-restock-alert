@@ -13,6 +13,14 @@ on:
         options:
           - "true"
           - "false"
+      baseline_only:
+        description: "Save current statuses without sending stock-change alerts"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: write
@@ -41,7 +49,9 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
           SKIP_BUSINESS_HOURS_CHECK: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_business_hours_check || 'false' }}
+          BASELINE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.baseline_only || 'false' }}
         run: python check_stock.py
 
       - name: Commit updated state.json
@@ -55,5 +65,8 @@ jobs:
             echo "No state change to commit."
           else
             git commit -m "Update stock check state"
-            git push
+
+            git pull --rebase origin main
+
+            git push origin main
           fi
