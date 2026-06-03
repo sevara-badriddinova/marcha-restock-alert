@@ -1,0 +1,59 @@
+name: Matcha Restock Check
+
+on:
+  schedule:
+    - cron: "*/5 0-8 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      skip_business_hours_check:
+        description: "Allow a manual test run outside Japan business hours"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: matcha-restock-check
+  cancel-in-progress: false
+
+jobs:
+  check-stock:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run stock checker
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          SKIP_BUSINESS_HOURS_CHECK: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_business_hours_check || 'false' }}
+        run: python check_stock.py
+
+      - name: Commit updated state.json
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add state.json
+
+          if git diff --cached --quiet; then
+            echo "No state change to commit."
+          else
+            git commit -m "Update stock check state"
+            git push
+          fi
