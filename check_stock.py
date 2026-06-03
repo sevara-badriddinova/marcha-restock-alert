@@ -1,8 +1,9 @@
 import json
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from urllib.parse import urljoin, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
@@ -59,8 +60,8 @@ def load_state() -> Dict:
     except FileNotFoundError:
         state = {}
     except json.JSONDecodeError:
-        print("state.json is not valid JSON. Starting with an empty state.")
-        state = {}
+        print("state.json is not valid JSON. Starting with an empty state and suppressing stock alerts.")
+        state = {"state_load_failed": True}
 
     return ensure_state_shape(state)
 
@@ -196,6 +197,24 @@ def parse_product_page_status(html: str) -> str:
     return IN_STOCK
 
 
+def clean_product_name(name: str) -> str:
+    name = re.sub(r"\s+", " ", name).strip()
+    name = re.sub(r"\$\s+(\d+)\s+\.(\d+)", r"$\1.\2", name)
+    name = re.sub(r"¥\s+([\d,]+)", r"¥\1", name)
+    name = name.replace(" 〜", "〜").replace("〜", "+")
+    return name
+
+
+def user_status_label(status: str) -> str:
+    labels = {
+        IN_STOCK: "available",
+        OUT_OF_STOCK: "sold out",
+        UNKNOWN: "unknown",
+        REQUEST_FAILED: "check failed",
+    }
+    return labels.get(status, status.lower())
+
+
 def check_product(product: Dict[str, str]) -> Dict[str, str]:
     with requests.Session() as session:
         try:
@@ -234,7 +253,7 @@ def update_state_with_successful_results(state: Dict, results: List[Dict[str, st
             continue
 
         products_state[result["id"]] = {
-            "name": result["name"],
+            "name": clean_product_name(result["name"]),
             "url": result["url"],
             "status": result["status"],
             "last_seen_at": utc_now_iso(),
@@ -328,6 +347,7 @@ def welcome_message() -> str:
         "🍵 Matcha Restock Bot 🍵\n\n"
         "✅ You're subscribed to Marukyu Koyamaen matcha restock alerts 🔔\n\n"
         "📦 I'll notify you only when a product comes back in stock ✨\n\n"
+        "⏱ Commands are checked by scheduled GitHub Actions runs, so replies can take a few minutes.\n\n"
         "🤖 Commands:\n"
         "📊 /status - see currently available products\n"
         "📝 /all - see inventory summary/full list\n"
@@ -346,7 +366,7 @@ def help_message() -> str:
 
 
 def product_block(product: Dict) -> str:
-    return "\n".join([product.get("name", "Unknown product"), product.get("url", "")]).strip()
+    return "\n".join([clean_product_name(product.get("name", "Unknown product")), product.get("url", "")]).strip()
 
 
 def build_status_messages(state: Dict) -> List[str]:
@@ -359,7 +379,7 @@ def build_status_messages(state: Dict) -> List[str]:
         return ["No matcha products appear in stock right now. I'll notify you when something restocks."]
 
     blocks = [product_block(product) for product in sorted(in_stock_products, key=lambda item: item.get("name", ""))]
-    title = f"Currently IN_STOCK matcha products: {len(in_stock_products)}"
+    title = f"Currently available matcha products: {len(in_stock_products)}"
     return split_blocks_into_messages(title, blocks)
 
 
@@ -382,9 +402,9 @@ def build_all_inventory_messages(state: Dict) -> List[str]:
     title = "\n".join(
         [
             "Matcha inventory summary",
-            f"{IN_STOCK}: {len(grouped.get(IN_STOCK, []))}",
-            f"{OUT_OF_STOCK}: {len(grouped.get(OUT_OF_STOCK, []))}",
-            f"{UNKNOWN}/REQUEST_FAILED: {unknown_count}",
+            f"Available: {len(grouped.get(IN_STOCK, []))}",
+            f"Sold out: {len(grouped.get(OUT_OF_STOCK, []))}",
+            f"Unknown/check failed: {unknown_count}",
         ]
     )
 
@@ -394,7 +414,7 @@ def build_all_inventory_messages(state: Dict) -> List[str]:
         if not status_products:
             continue
 
-        blocks.append(status)
+        blocks.append(user_status_label(status).title())
         blocks.extend(product_block(product) for product in status_products)
 
     return split_blocks_into_messages(title, blocks)
@@ -473,8 +493,8 @@ def process_telegram_commands(state: Dict, bot_token: str) -> bool:
 
 
 def build_change_block(change: Dict[str, str]) -> str:
-    arrow = f"{change['previous_status']} -> {change['current_status']}"
-    return "\n".join([change["name"], arrow, change["url"]])
+    arrow = f"{user_status_label(change['previous_status'])} -> {user_status_label(change['current_status'])}"
+    return "\n".join([clean_product_name(change["name"]), arrow, change["url"]])
 
 
 def changes_to_messages(title: str, changes: List[Dict[str, str]]) -> List[str]:
@@ -487,11 +507,15 @@ def subscriber_chat_ids(state: Dict) -> List[str]:
     return sorted(str(chat_id) for chat_id in subscribers)
 
 
+def dedupe_chat_ids(chat_ids: List[Optional[str]]) -> List[str]:
+    return sorted(set(str(chat_id) for chat_id in chat_ids if chat_id))
+
+
 def alert_chat_ids(state: Dict, fallback_chat_id: Optional[str]) -> List[str]:
     chat_ids = subscriber_chat_ids(state)
     if not chat_ids and fallback_chat_id:
         chat_ids.append(str(fallback_chat_id))
-    return chat_ids
+    return dedupe_chat_ids(chat_ids)
 
 
 def send_stock_alerts(
@@ -507,22 +531,44 @@ def send_stock_alerts(
         if change["current_status"] == IN_STOCK
         and change["previous_status"] in {OUT_OF_STOCK, UNKNOWN}
     ]
+    admin_targets = dedupe_chat_ids([admin_chat_id])
+    normal_targets = [
+        chat_id
+        for chat_id in alert_chat_ids(state, fallback_chat_id)
+        if chat_id not in admin_targets
+    ]
 
-    success = True
+    attempted_count = 0
+    failed_count = 0
+
     if restock_changes:
         messages = changes_to_messages("Matcha restock alert", restock_changes)
-        for chat_id in alert_chat_ids(state, fallback_chat_id):
+        for chat_id in normal_targets:
+            attempted_count += 1
             if not try_send_telegram_messages(bot_token, chat_id, messages, "subscriber restock alert"):
-                success = False
+                failed_count += 1
     else:
         print("No subscriber restock alerts needed.")
 
     if admin_chat_id:
         admin_messages = changes_to_messages("Admin matcha stock changes", changes)
-        if not try_send_telegram_messages(bot_token, str(admin_chat_id), admin_messages, "admin stock alert"):
-            success = False
+        for chat_id in admin_targets:
+            attempted_count += 1
+            if not try_send_telegram_messages(bot_token, chat_id, admin_messages, "admin stock alert"):
+                failed_count += 1
 
-    return success
+    if attempted_count == 0:
+        print("No Telegram stock-alert recipients configured.")
+        return True
+
+    if failed_count == attempted_count:
+        print("All Telegram stock-alert sends failed.")
+        return False
+
+    if failed_count:
+        print(f"{failed_count} Telegram stock-alert send(s) failed, but at least one recipient succeeded.")
+
+    return True
 
 
 def run_product_checks(state: Dict, bot_token: str, fallback_chat_id: Optional[str], admin_chat_id: Optional[str]) -> bool:
@@ -550,8 +596,12 @@ def run_product_checks(state: Dict, bot_token: str, fallback_chat_id: Optional[s
 
     changes = find_status_changes(state, results)
 
-    if env_flag("BASELINE_ONLY"):
-        print("BASELINE_ONLY=true, saving current statuses without stock-change Telegram alerts.")
+    if env_flag("BASELINE_ONLY") or state.get("state_load_failed"):
+        if state.get("state_load_failed"):
+            print("state.json could not be loaded, saving baseline statuses without stock-change alerts.")
+            state.pop("state_load_failed", None)
+        else:
+            print("BASELINE_ONLY=true, saving current statuses without stock-change Telegram alerts.")
         update_state_with_successful_results(state, results)
         return True
 
