@@ -1,5 +1,5 @@
 {
-  "last_checked_at": "2026-07-17T10:22:31.836385+00:00",
+  "last_checked_at": "2026-07-17T10:24:33.735795+00:00",
   "products": {
     "1111020c1": {
       "last_seen_at": "2026-07-17T06:34:52.841863+00:00",
@@ -315,7 +315,7 @@
     }
   },
   "telegram": {
-    "last_update_id": 534314919,
+    "last_update_id": 534314920,
     "subscribers": {
       "383420669": {
         "first_name": "Sevara",
